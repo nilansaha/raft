@@ -12,7 +12,7 @@ import (
 
 var serverPort = flag.String("server-port", ":8080", "HTTP port")
 var allServers = []string{":8080", ":8081", ":8082"}
-var timeout float64 = 2
+var timeout = 2 * time.Second
 
 type State struct {
 	currentTerm   int
@@ -102,14 +102,14 @@ func (s *State) sendHeartbeats() {
 }
 
 func (s *State) checkHeartbeat() {
-	if s.lastHeartbeat.IsZero() || time.Since(s.lastHeartbeat).Seconds() >= timeout {
+	if s.lastHeartbeat.IsZero() || time.Since(s.lastHeartbeat) >= timeout {
 		fmt.Println("Calling Election")
 		s.callElection()
 	}
 }
 
 func (s *State) heartbeatRoutine() {
-	for range time.Tick(time.Duration(timeout) * time.Second) {
+	for range time.Tick(timeout) {
 		if s.isLeader {
 			s.sendHeartbeats()
 		} else {
