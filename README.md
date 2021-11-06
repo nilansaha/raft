@@ -7,7 +7,7 @@ POC to implement the election algorithms for Raft and reacting to leader failure
 - Run the killed node again and watching it join the network and accept the current leader
 
 ```
-go run main.go --server-port :8080
-go run main.go --server-port :8081
-go run main.go --server-port :8082
+go run main.go --server-port 8080
+go run main.go --server-port 8081
+go run main.go --server-port 8082
 ```
