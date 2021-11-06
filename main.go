@@ -10,46 +10,57 @@ import (
 	"time"
 )
 
-var serverPort = flag.String("server-port", ":8080", "HTTP port")
-var allServers = []string{":8080", ":8081", ":8082"}
+var serverPort = flag.String("server-port", "8080", "HTTP port")
+var peerPorts = []string{"8080", "8081", "8082"}
 var timeout = 2 * time.Second
 
-type State struct {
+type Raft struct {
+	localAddr     string
+	peers         []string
 	currentTerm   int
 	lastHeartbeat time.Time
 	givenVotes    map[int]int
 	isLeader      bool
 }
 
-func NewState() *State {
-	return &State{
+func NewRaft() *Raft {
+	peers := make([]string, 0)
+	for _, port := range peerPorts {
+		if port != *serverPort {
+			peers = append(peers, fmt.Sprintf("http://0.0.0.0:%s", port))
+		}
+	}
+
+	return &Raft{
+		localAddr:   fmt.Sprintf("http://0.0.0.0:%s", *serverPort),
+		peers:       peers,
 		currentTerm: 0,
 		givenVotes:  make(map[int]int),
 		isLeader:    false,
 	}
 }
 
-func (s *State) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+func (raft *Raft) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	requestServer := r.URL.Query()["server"][0]
 	requestTerm, _ := strconv.Atoi(r.URL.Query()["term"][0])
 
-	if requestTerm > s.currentTerm {
-		s.currentTerm = requestTerm
-		s.isLeader = false
+	if requestTerm > raft.currentTerm {
+		raft.currentTerm = requestTerm
+		raft.isLeader = false
 		fmt.Println("New Leader is", requestServer)
 	}
 
-	s.lastHeartbeat = time.Now()
+	raft.lastHeartbeat = time.Now()
 	fmt.Fprintf(w, "Ack. Heartbeat")
 }
 
-func (s *State) handleRequestVotes(w http.ResponseWriter, r *http.Request) {
+func (raft *Raft) handleRequestVotes(w http.ResponseWriter, r *http.Request) {
 	requestServer := r.URL.Query()["server"][0]
 	requestTerm, _ := strconv.Atoi(r.URL.Query()["term"][0])
 
 	fmt.Println(requestServer, "Asking for vote on term", requestTerm)
 
-	if _, exist := s.givenVotes[requestTerm]; exist || s.currentTerm > requestTerm {
+	if _, exist := raft.givenVotes[requestTerm]; exist || raft.currentTerm > requestTerm {
 		w.WriteHeader(500)
 	} else {
 		w.WriteHeader(200)
@@ -58,62 +69,56 @@ func (s *State) handleRequestVotes(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Ack. RequestVotes")
 }
 
-func (s *State) callElection() {
-	votesRequired := int(math.Round(float64(len(allServers)) / 2))
+func (raft *Raft) callElection() {
+	votesRequired := int(math.Round(float64(len(raft.peers)) / 2))
 	receivedVotes := 1
-	s.currentTerm++
-	s.givenVotes[s.currentTerm] = 1
+	raft.currentTerm++
+	raft.givenVotes[raft.currentTerm] = 1
 
-	for _, server := range allServers {
-		if server != *serverPort {
-			serverAddress := fmt.Sprintf("http://0.0.0.0%s", server)
-			query := fmt.Sprintf("%s/requestVote?term=%d&server=%s", serverAddress, s.currentTerm, *serverPort)
-			resp, err := http.Get(query)
-			if err != nil {
-				fmt.Println("Error on", serverAddress, err)
-				continue
-			}
+	for _, server := range raft.peers {
+		query := fmt.Sprintf("%s/requestVote?term=%d&server=%s", server, raft.currentTerm, raft.localAddr)
+		resp, err := http.Get(query)
+		if err != nil {
+			fmt.Println("Error on", server, err)
+			continue
+		}
 
-			if resp.StatusCode == 200 {
-				receivedVotes++
-				fmt.Println("Received vote from", server)
-			} else {
-				fmt.Println("Didn't receive vote from", server)
-			}
+		if resp.StatusCode == 200 {
+			receivedVotes++
+			fmt.Println("Received vote from", server)
+		} else {
+			fmt.Println("Didn't receive vote from", server)
 		}
 
 		if receivedVotes >= votesRequired {
 			fmt.Println("I am Leader now")
-			s.isLeader = true
-			s.sendHeartbeats()
+			raft.isLeader = true
+			raft.sendHeartbeats()
 			break
 		}
 	}
 }
 
-func (s *State) sendHeartbeats() {
-	for _, server := range allServers {
-		if server != *serverPort {
-			serverAddress := fmt.Sprintf("http://0.0.0.0%s", server)
-			query := fmt.Sprintf("%s/heartbeat?server=%s&term=%d", serverAddress, *serverPort, s.currentTerm)
-			http.Get(query)
-		}
+func (raft *Raft) sendHeartbeats() {
+	for _, server := range raft.peers {
+		query := fmt.Sprintf("%s/heartbeat?server=%s&term=%d", server, raft.localAddr, raft.currentTerm)
+		http.Get(query)
 	}
 }
 
-func (s *State) checkHeartbeat() {
-	if s.lastHeartbeat.IsZero() || time.Since(s.lastHeartbeat) >= timeout {
+func (raft *Raft) checkHeartbeat() {
+	if raft.lastHeartbeat.IsZero() || time.Since(raft.lastHeartbeat) >= timeout {
 		fmt.Println("Calling Election")
-		s.callElection()
+		raft.callElection()
 	}
 }
 
-func (s *State) heartbeatRoutine() {
+func (raft *Raft) runRoutine() {
 	for range time.Tick(timeout) {
-		if s.isLeader {
-			s.sendHeartbeats()
+		if raft.isLeader {
+			raft.sendHeartbeats()
 		} else {
-			s.checkHeartbeat()
+			raft.checkHeartbeat()
 		}
 	}
 }
@@ -121,12 +126,12 @@ func (s *State) heartbeatRoutine() {
 func main() {
 	flag.Parse()
 
-	state := NewState()
-	http.HandleFunc("/heartbeat", state.handleHeartbeat)
-	http.HandleFunc("/requestVote", state.handleRequestVotes)
+	raft := NewRaft()
+	http.HandleFunc("/heartbeat", raft.handleHeartbeat)
+	http.HandleFunc("/requestVote", raft.handleRequestVotes)
 
-	go state.heartbeatRoutine()
+	go raft.runRoutine()
 
 	fmt.Println("Web Server Started @", *serverPort)
-	log.Fatal(http.ListenAndServe(*serverPort, nil))
+	log.Fatal(http.ListenAndServe(":"+*serverPort, nil))
 }
